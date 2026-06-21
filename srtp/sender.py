@@ -64,6 +64,9 @@ class Sender:
                 data, _ = self.sock.recvfrom(packet.HEADER_SIZE + packet.MAX_PAYLOAD)
             except socket.timeout:
                 return None
+            except ConnectionResetError:
+                # Windows-specific: ICMP port unreachable recebido; ignora e continua
+                continue
             pkt = packet.parse(data)
             if pkt is None or not pkt.valid:
                 # pacote corrompido/curto: ignora e segue aguardando
@@ -232,7 +235,6 @@ class Sender:
     def _handle_ack(self, reply, acked, total, seq_of, selective):
         if not selective:
             # GBN: ACK cumulativo -> confirma tudo ate reply.ack inclusive.
-            # Encontra o indice cujo SEQ == reply.ack dentro da janela atual.
             for i in range(total):
                 if seq_of(i) == reply.ack:
                     for j in range(0, i + 1):
