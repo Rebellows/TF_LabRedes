@@ -1,7 +1,7 @@
 from . import packet
 
 def split_into_packets(data: bytes):
-  """Retorna uma lista de tuplas (bytes, length)."""
+    """Retorna uma lista de tuplas (bytes, length)."""
     out = []
 
     # Se o arquivo for vazio, precisa enviar um pacote de terminacao (payload vazio)
