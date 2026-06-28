@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-SRTP - Simple Reliable Transport Protocol sobre UDP.
-
-Modo receiver (listen):
-    python3 main.py --listen --port 6000 --mode saw --out recebido.bin
-
-Modo sender (connect):
-    python3 main.py --host 192.168.1.10 --port 6000 --mode saw --file arquivo.bin
-
-O mesmo binario suporta os tres modos via --mode [saw|gbn|sr].
-"""
-
 import argparse
 import sys
 
@@ -44,20 +31,20 @@ def main(argv=None):
     verbose = not args.quiet
 
     if args.mode == "saw":
-        # stop-and-wait equivale a janela 1
+        # stop-and-wait equivale a janela 1, valor fixo
         window = 1
     else:
-        window = max(1, min(255, args.window))
+        window = max(1, min(255, args.window)) # janela variavel
 
     if args.listen:
         recv = Receiver(args.port, args.out, window, args.mode, verbose=verbose)
         recv.run()
     else:
         if not args.host:
-            print("erro: --host e obrigatorio no modo sender", file=sys.stderr)
+            print("erro: --host eh obrigatorio no modo sender", file=sys.stderr)
             return 2
         if not args.file:
-            print("erro: --file e obrigatorio no modo sender", file=sys.stderr)
+            print("erro: --file eh obrigatorio no modo sender", file=sys.stderr)
             return 2
         sender = Sender(args.host, args.port, window, args.mode, verbose=verbose)
         sender.run(args.file)

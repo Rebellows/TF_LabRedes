@@ -1,19 +1,3 @@
-"""
-Lado SENDER do RTP.
-
-Fluxo geral:
-    1. Handshake three-way (envia SYN, recebe SYN+ACK, envia ACK).
-    2. Transferencia de dados conforme o modo (saw | gbn | sr).
-    3. Encerramento two-way (envia FIN, recebe FIN+ACK).
-
-Enderecamento (conforme a spec):
-    - O sender faz bind na porta P+1 (porta onde "escuta" ACKs/NACKs) e
-      usa essa mesma porta como origem de todos os envios para o receiver:P.
-    - O receiver, ao responder, envia para (sender_ip, P+1).
-    Como o sender sempre usa P+1 como porta de origem, o handshake e a
-    transferencia ficam consistentes e interoperaveis.
-"""
-
 import socket
 import time
 
@@ -42,30 +26,25 @@ class Sender:
         self.data_packets_sent = 0
         self.bytes_sent = 0
 
-    def log(self, *a):
+    def log(self, *a): # log de debug
         if self.verbose:
             print("[sender]", *a)
 
-    # ------------------------------------------------------------------
-    # Envio / recebimento de baixo nivel
-    # ------------------------------------------------------------------
-    def _send(self, pkt):
+    def _send(self, pkt): # envia um pacote
         self.sock.sendto(pkt.to_bytes(), self.dst)
 
-    def _recv(self, timeout):
-        """Recebe um pacote valido. Retorna Packet ou None se timeout."""
+    def _recv(self, timeout): # recebe um pacote, validando CRC32
         deadline = time.monotonic() + timeout
-        while True:
+        while True: # aguarda pacote
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             self.sock.settimeout(remaining)
-            try:
+            try: # recebe pacote de dados (header + payload)
                 data, _ = self.sock.recvfrom(packet.HEADER_SIZE + packet.MAX_PAYLOAD)
             except socket.timeout:
                 return None
             except ConnectionResetError:
-                # Windows-specific: ICMP port unreachable recebido; ignora e continua
                 continue
             pkt = packet.parse(data)
             if pkt is None or not pkt.valid:
@@ -73,51 +52,41 @@ class Sender:
                 continue
             return pkt
 
-    # ------------------------------------------------------------------
-    # Handshake
-    # ------------------------------------------------------------------
-    def handshake(self):
+    def handshake(self): # primeiro passo: SYN
         syn = packet.make_syn(self.window)
-        while True:
+        while True: # aguarda SYN+ACK
             self._send(syn)
             self.log(f"SYN enviado (janela proposta={self.window})")
             reply = self._recv(packet.TIMEOUT)
-            if reply is None:
+            if reply is None: # timeout
                 self.log("timeout aguardando SYN+ACK, reenviando SYN")
                 continue
-            if reply.is_syn_ack:
+            if reply.is_syn_ack: # SYN+ACK
                 peer_window = reply.length
                 self.effective_window = min(self.window, peer_window)
-                self.log(f"SYN+ACK recebido (janela do peer={peer_window}); "
-                         f"janela efetiva={self.effective_window}")
+                self.log(f"SYN+ACK recebido (janela do peer={peer_window}); "f"janela efetiva={self.effective_window}")
                 break
         # terceiro passo: ACK
         self._send(packet.make_handshake_ack())
         self.log("ACK do handshake enviado; conexao estabelecida")
 
-    # ------------------------------------------------------------------
-    # Encerramento
-    # ------------------------------------------------------------------
-    def teardown(self):
+    def teardown(self): # quarto passo: FIN
         fin = packet.make_fin()
-        while True:
+        while True: # aguarda FIN+ACK
             self._send(fin)
             self.log("FIN enviado")
             reply = self._recv(packet.TIMEOUT)
             if reply is None:
                 self.log("timeout aguardando FIN+ACK, reenviando FIN")
                 continue
-            if reply.is_fin_ack:
+            if reply.is_fin_ack: # FIN+ACK
                 self.log("FIN+ACK recebido; conexao encerrada")
                 return
 
-    # ------------------------------------------------------------------
-    # Transferencia
-    # ------------------------------------------------------------------
-    def send_file(self, path):
+    def send_file(self, path): # envia o arquivo em pacotes de dados
         with open(path, "rb") as f:
             data = f.read()
-        pkts = chunking.split_into_packets(data)
+        pkts = chunking.split_into_packets(data) # divide em pacotes
         self.log(f"arquivo: {len(data)} bytes -> {len(pkts)} pacotes de dados")
 
         start = time.monotonic()
@@ -146,34 +115,30 @@ class Sender:
         self.log(f"throughput           : {thr/1e6:.4f} Mbit/s "
                  f"({self.bytes_sent/elapsed/1024:.2f} KB/s)" if elapsed > 0 else "n/a")
 
-    # ------------------------------------------------------------------
-    # Stop-and-Wait
-    # ------------------------------------------------------------------
-    def _send_stop_and_wait(self, pkts):
+    # stop-and-wait
+    def _send_stop_and_wait(self, pkts): # envia pacotes de dados e aguarda ACK
         seq = 0
-        for payload, length in pkts:
+        for payload, length in pkts: # envia todos os pacotes
             pkt = packet.make_data(seq, payload, length)
             first = True
-            while True:
+            while True: # aguarda ACK do pacote atual
                 self._send(pkt)
                 self.data_packets_sent += 1
-                if not first:
+                if not first: # retransmissao
                     self.retransmissions += 1
                 first = False
                 reply = self._recv(packet.TIMEOUT)
-                if reply is None:
+                if reply is None: # timeout
                     self.log(f"timeout no SEQ={seq}, retransmitindo")
                     continue
-                if reply.ack_flag and reply.ack == seq:
+                if reply.ack_flag and reply.ack == seq: # ACK do pacote
                     break
                 # ACK de outro numero / NACK: retransmite
                 if reply.nack:
                     self.log(f"NACK recebido para SEQ={seq}, retransmitindo")
             seq = packet.seq_next(seq)
 
-    # ------------------------------------------------------------------
     # Go-Back-N e Selective Repeat (janela deslizante)
-    # ------------------------------------------------------------------
     def _send_sliding(self, pkts, selective):
         N = self.effective_window
         total = len(pkts)
@@ -184,16 +149,16 @@ class Sender:
         acked = [False] * total
         send_time = {}    # indice -> instante de envio (para timeout)
 
-        def seq_of(i):
+        def seq_of(i): # retorna o SEQ correspondente ao indice
             return i & packet.SEQ_MASK
 
-        def send_idx(i):
+        def send_idx(i): # envia o pacote de indice i
             payload, length = pkts[i]
             self._send(packet.make_data(seq_of(i), payload, length))
             send_time[i] = time.monotonic()
             self.data_packets_sent += 1
 
-        while base < total:
+        while base < total: # envia todos os pacotes
             # 1) preenche a janela
             while next_idx < base + N and next_idx < total:
                 send_idx(next_idx)
@@ -205,7 +170,7 @@ class Sender:
             reply = self._recv(wait)
 
             if reply is None:
-                # TIMEOUT
+                # timeout
                 if selective:
                     # SR: retransmite apenas o pacote base (nao confirmado)
                     self.log(f"[SR] timeout, retransmite base SEQ={seq_of(base)}")
@@ -213,8 +178,7 @@ class Sender:
                     self.retransmissions += 1
                 else:
                     # GBN: retransmite toda a janela a partir de base
-                    self.log(f"[GBN] timeout, retransmite janela a partir de "
-                             f"SEQ={seq_of(base)}")
+                    self.log(f"[GBN] timeout, retransmite janela a partir de "f"SEQ={seq_of(base)}")
                     for i in range(base, next_idx):
                         send_idx(i)
                         self.retransmissions += 1

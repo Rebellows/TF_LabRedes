@@ -1,4 +1,4 @@
-# SRTP — Simple Reliable Transport Protocol sobre UDP
+# SRTP - Simple Reliable Transport Protocol sobre UDP
 
 Protocolo de transporte confiável sobre UDP, com três variantes de controle de
 erros e fluxo selecionáveis em tempo de execução: **stop-and-wait (saw)**,
@@ -28,12 +28,12 @@ capturas/          # arquivos .pcapng dos cenários de teste
 
 O protocolo utiliza **duas portas UDP**:
 
-- **Porta P** — receiver escuta dados e handshake.
-- **Porta P+1** — sender escuta ACKs/NACKs (e usa como porta de origem de todos os envios).
+- **Porta P** - receiver escuta dados e handshake.
+- **Porta P+1** - sender escuta ACKs/NACKs (e usa como porta de origem de todos os envios).
 
 Ambas as portas precisam estar abertas no firewall de **ambas as máquinas**.
 
-### Windows — liberar portas no firewall (executar como Administrador)
+### Windows - liberar portas no firewall (executar como Administrador)
 
 Na máquina **receiver** (porta P e P+1 de entrada):
 
@@ -70,7 +70,7 @@ $bytes = New-Object byte[] 50000
 [IO.File]::WriteAllBytes("testfile.bin", $bytes)
 ```
 
-O receiver não precisa do arquivo original — apenas o sender usa `--file`.
+O receiver não precisa do arquivo original - apenas o sender usa `--file`.
 
 ## Execução
 
@@ -165,7 +165,7 @@ O firewall do receiver está bloqueando a porta P. Execute a regra de firewall
 na máquina receiver para liberar a porta de entrada dos dados.
 
 **`ConnectionResetError: [WinError 10054]` no receiver:**
-Comportamento normal no Windows — ocorre quando o sender envia para uma porta
+Comportamento normal no Windows - ocorre quando o sender envia para uma porta
 fechada e o sistema retorna um ICMP "port unreachable". O código já trata esse
 erro com `except ConnectionResetError: continue` no loop de recepção.
 

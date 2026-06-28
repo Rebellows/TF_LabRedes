@@ -1,33 +1,9 @@
-"""
-Definicao do pacote RTP (Simple Reliable Transport Protocol).
-
-Cabecalho de 9 bytes:
-
-     0                   1                   2
-     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 ...
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+...
-    |S|F|     SEQ (14 bits)     |A|N|     ACK (14 bits)    |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+...
-    |   Length (8 bits)    |          CRC32 (32 bits)      |
-    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+...
-
-Os 4 primeiros bytes formam uma palavra de 32 bits (big-endian):
-    bit 0 (MSB) : SYN
-    bit 1       : FIN
-    bits 2..15  : SEQ (14 bits)
-    bit 16      : ACK flag
-    bit 17      : NACK
-    bits 18..31 : ACK (14 bits)
-Em seguida: Length (1 byte) e CRC32 (4 bytes). Total = 4 + 1 + 4 = 9 bytes.
-"""
-
 import struct
 import zlib
 from dataclasses import dataclass
 
-# ---------------------------------------------------------------------------
-# Constantes do protocolo
-# ---------------------------------------------------------------------------
+
+# --- Constantes do protocolo ---
 HEADER_SIZE = 9            # tamanho do cabecalho em bytes
 MAX_PAYLOAD = 255          # bytes de payload por pacote de dados (cheio)
 SEQ_BITS = 14              # espaco de numero de sequencia
@@ -40,7 +16,7 @@ _STRUCT_FMT = ">IBI"
 
 
 def _pack_word(seq, ack, syn, fin, ack_flag, nack):
-    """Monta a palavra de 32 bits com os campos do cabecalho."""
+    """Monta a palavra de 32 bits com os campos do cabecalho, ainda sem CRC"""
     return (
         ((syn & 1) << 31)
         | ((fin & 1) << 30)
@@ -50,9 +26,11 @@ def _pack_word(seq, ack, syn, fin, ack_flag, nack):
         | (ack & SEQ_MASK)
     )
 
-
+# [SYN(1) FIN(1) SEQ(14) ACKflag(1) NACK(1) ACK(14)] [Length(8)] [CRC32(32)]
 def _make_header(seq, ack, syn, fin, ack_flag, nack, length, crc):
+    # Monta o cabecalho
     word = _pack_word(seq, ack, syn, fin, ack_flag, nack)
+    # Retorna os bytes do cabecalho com o CRC fornecido (ou 0 se ainda nao calculado)
     return struct.pack(_STRUCT_FMT, word, length & 0xFF, crc & 0xFFFFFFFF)
 
 
@@ -72,58 +50,52 @@ class Packet:
 
     def to_bytes(self):
         """Serializa o pacote, calculando o CRC32 sobre cabecalho+payload."""
-        # 1) cabecalho com campo CRC zerado
+        # cabecalho inicial, sem CRC
         header_zero = _make_header(
             self.seq, self.ack, self.syn, self.fin,
             self.ack_flag, self.nack, self.length, crc=0,
         )
-        # 2) CRC32 sobre (cabecalho zerado || payload)
+        # computa o CRC32 sobre cabecalho+payload com o campo CRC zerado
         crc = zlib.crc32(header_zero + self.payload) & 0xFFFFFFFF
-        # 3) cabecalho definitivo com o CRC correto
+        # monta o cabecalho final com o CRC calculado
         header = _make_header(
             self.seq, self.ack, self.syn, self.fin,
             self.ack_flag, self.nack, self.length, crc=crc,
         )
         return header + self.payload
 
-    # --- atalhos de classificacao ---------------------------------------
+    # --- propriedades para analise de flags, para simplificar o codigo do sender/receiver --- 
     @property
-    def is_syn_only(self):
+    def is_syn_only(self): # sender inicia handshake: SYN puro, sem ACK
         return self.syn and not self.ack_flag
 
     @property
-    def is_syn_ack(self):
+    def is_syn_ack(self): # receiver responde handshake: SYN+ACK
         return self.syn and self.ack_flag
 
     @property
-    def is_fin(self):
+    def is_fin(self): # sender inicia encerramento: FIN puro, sem ACK
         return self.fin and not self.ack_flag
 
     @property
-    def is_fin_ack(self):
+    def is_fin_ack(self): # receiver responde encerramento: FIN+ACK
         return self.fin and self.ack_flag
 
     @property
-    def is_pure_ack(self):
-        """ACK/NACK puro de controle (sem dados, sem SYN/FIN)."""
+    def is_pure_ack(self): # ACK puro, sem SYN/FIN/NACK, confirma recebimento ou retransmissao de um pacote
         return (self.ack_flag or self.nack) and not self.syn and not self.fin
 
     @property
-    def is_data(self):
-        """Pacote de dados: nao tem flags de controle ativadas."""
+    def is_data(self): # pacote de dados
         return not (self.syn or self.fin or self.ack_flag or self.nack)
 
 
 def parse(data):
-    """
-    Decodifica bytes recebidos em um Packet.
-
-    Retorna None se for menor que o cabecalho. Caso contrario retorna um
-    Packet com o campo .valid indicando se o CRC32 confere.
-    """
+    """Decodifica bytes recebidos em um pacote Packet, validando o CRC32."""
     if len(data) < HEADER_SIZE:
         return None
 
+    # Desmonta o cabecalho, inverso da funcao _make_header
     word, length, crc = struct.unpack(_STRUCT_FMT, data[:HEADER_SIZE])
     payload = data[HEADER_SIZE:]
 
@@ -142,62 +114,48 @@ def parse(data):
     return Packet(seq, ack, syn, fin, ack_flag, nack, length, crc, payload, valid)
 
 
-# ---------------------------------------------------------------------------
-# Construtores de conveniencia
-# ---------------------------------------------------------------------------
-def make_syn(window):
-    """SYN do iniciador. Length carrega a janela proposta."""
+# --- Construtores de pacotes para o sender/receiver, simplificando a criacao de pacotes com flags e campos corretos ---
+
+def make_syn(window): # SYN do sender
     return Packet(seq=0, ack=0, syn=1, length=window)
 
 
-def make_syn_ack(window):
-    """SYN+ACK do receiver. Length carrega a janela proposta."""
+
+def make_syn_ack(window): # SYN+ACK do receiver
     return Packet(seq=0, ack=0, syn=1, ack_flag=1, length=window)
 
 
-def make_handshake_ack():
-    """Terceiro passo do handshake: ACK puro com SEQ/ACK = 0."""
+def make_handshake_ack(): # ACK do handshake
     return Packet(seq=0, ack=0, ack_flag=1, length=0)
 
 
-def make_data(seq, payload, length):
-    """Pacote de dados. length segue a semantica do campo Length."""
+def make_data(seq, payload, length): # pacote de dados, com cabecalho e payload
     return Packet(seq=seq, payload=payload, length=length)
 
 
-def make_ack(ack_num):
-    """ACK puro confirmando um numero de sequencia."""
+def make_ack(ack_num): # ACK puro, carregando o numero de sequencia a ser confirmado
     return Packet(seq=0, ack=ack_num, ack_flag=1, length=0)
 
 
-def make_nack(seq_esperado):
-    """NACK carregando, no campo ACK, o numero de sequencia esperado/faltante."""
+def make_nack(seq_esperado): # NACK puro, carregando o numero de sequencia esperado
     return Packet(seq=0, ack=seq_esperado, nack=1, length=0)
 
 
-def make_fin():
+def make_fin(): # FIN do sender
     return Packet(seq=0, ack=0, fin=1, length=0)
 
 
-def make_fin_ack():
+def make_fin_ack(): # FIN+ACK do receiver
     return Packet(seq=0, ack=0, fin=1, ack_flag=1, length=0)
 
-
-# ---------------------------------------------------------------------------
-# Utilitarios de numero de sequencia (wrap-around de 14 bits)
-# ---------------------------------------------------------------------------
-def seq_next(seq):
+def seq_next(seq): # retorna o proximo numero de sequencia, com wrap-around no espaco circular de 14 bits
     return (seq + 1) & SEQ_MASK
 
 
-def seq_add(seq, n):
+def seq_add(seq, n): # retorna o numero de sequencia somado a n, com wrap-around no espaco circular de 14 bits
     return (seq + n) & SEQ_MASK
 
 
-def seq_in_window(seq, base, size):
-    """
-    Verifica se 'seq' esta dentro de [base, base+size) no espaco circular
-    de 14 bits. Usado por GBN/SR para validar pacotes/ACKs com wrap-around.
-    """
+def seq_in_window(seq, base, size): # verifica se o numero de sequencia seq esta dentro da janela [base, base+size), considerando wrap-around
     diff = (seq - base) & SEQ_MASK
     return diff < size
